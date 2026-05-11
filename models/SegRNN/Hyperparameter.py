@@ -8,9 +8,9 @@ H = 400   # history / input window
 L = 200   # forecast / prediction window
 
 batch_size = 128
-epochs     = 2
+epochs     = 100
 lr         = 0.0005
-fs         = 10
+stride     = 20
 
 use_early_stopping      = False
 early_stopping_patience = 5
@@ -49,7 +49,7 @@ def parse_args():
     parser.add_argument("--warmup-ratio",  type=float,           default=0.1,  help="Warmup fraction of total epochs")
     parser.add_argument("--early-stopping",action="store_true", default=use_early_stopping)
     parser.add_argument("--grad-clip",     type=float,        default=None,     help="Gradient clip norm")
-    parser.add_argument("--stride",        type=int,          default=20,       help="Sliding window stride")
+    parser.add_argument("--stride",        type=int,          default=stride,   help="Sliding window stride")
     parser.add_argument("--seed",          type=int,          default=2048)
     parser.add_argument("--cuda",          default="",        help="CUDA device index, e.g. 0 or 1")
     parser.add_argument("--swanlog",       action="store_true")

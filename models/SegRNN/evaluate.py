@@ -7,11 +7,15 @@ import torch
 import scipy.io as sio
 import h5py
 import matplotlib.pyplot as plt
+import seaborn as sns
 from torch.utils.data import DataLoader, TensorDataset
+
+sns.set_theme(style="ticks", palette="muted", font_scale=1.05)
+sns.despine()
 
 from split_data import split_data, create_sequences, calculate_metrics
 from SegRNN import Model
-from Hyperparameter import Configs, H, L, batch_size, fs
+from Hyperparameter import Configs, H, L, batch_size
 
 
 # ---------------------------------------------------------------------------
@@ -54,75 +58,111 @@ def _run_inference(model, loader, device):
     return np.concatenate(outs, axis=0)
 
 
+# ---------------------------------------------------------------------------
+# Color palette  (seaborn "muted" — low saturation, easy on the eyes)
+# ---------------------------------------------------------------------------
+_muted = sns.color_palette("muted")
+_P = {
+    "true":   _muted[0],   # muted blue
+    "pred":   _muted[1],   # muted orange
+    "error":  _muted[4],   # muted purple
+    "zero":   "#666666",
+    "split1": _muted[2],   # muted green  (train/val)
+    "split2": _muted[3],   # muted red    (val/test)
+    "mae":    _muted[0],
+    "mse":    _muted[1],
+    "rmse":   _muted[2],
+}
+
+
+def _style_ax(ax):
+    sns.despine(ax=ax)
+    ax.grid(True, linewidth=0.6, alpha=0.5)
+
+
 def save_compare_plot(x, y_true, y_pred, title, path, xlabel="Index", downsample=15000):
     step = max(1, len(x) // downsample)
     xs, yt, yp = x[::step], y_true[::step], y_pred[::step]
-    plt.figure(figsize=(14, 6))
-    plt.plot(xs, yt, label="True",      color="blue", linewidth=1.5)
-    plt.plot(xs, yp, label="Predicted", color="red",  linewidth=1.5, alpha=0.8)
-    plt.fill_between(xs, yt, yp, where=(yp >  yt), color="red",  alpha=0.1, label="Over-prediction")
-    plt.fill_between(xs, yt, yp, where=(yp <= yt), color="blue", alpha=0.1, label="Under-prediction")
-    plt.title(title, fontsize=16, fontweight="bold")
-    plt.xlabel(xlabel, fontsize=14)
-    plt.ylabel("Value", fontsize=14)
-    plt.legend(fontsize=12)
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(path, dpi=300, bbox_inches="tight")
-    plt.close()
+    fig, ax = plt.subplots(figsize=(14, 5))
+    _style_ax(ax)
+    ax.plot(xs, yt, label="True",      color=_P["true"], linewidth=1.4)
+    ax.plot(xs, yp, label="Predicted", color=_P["pred"], linewidth=1.4, alpha=0.85)
+    ax.fill_between(xs, yt, yp, where=(yp >  yt), color=_P["pred"], alpha=0.12)
+    ax.fill_between(xs, yt, yp, where=(yp <= yt), color=_P["true"], alpha=0.12)
+    ax.set_title(title, fontsize=15, fontweight="bold", pad=10)
+    ax.set_xlabel(xlabel, fontsize=12)
+    ax.set_ylabel("Value", fontsize=12)
+    ax.legend(fontsize=11, framealpha=0.9)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
 
 
 def save_error_plot(x, y_true, y_pred, title, path, xlabel="Index", downsample=15000):
     step = max(1, len(x) // downsample)
-    plt.figure(figsize=(14, 6))
-    plt.plot(x[::step], (y_pred - y_true)[::step], label="Prediction Error", color="purple", linewidth=1.5)
-    plt.axhline(0, color="black", linestyle="-", linewidth=1, alpha=0.7)
-    plt.title(title, fontsize=16, fontweight="bold")
-    plt.xlabel(xlabel, fontsize=14)
-    plt.ylabel("Error (Pred - True)", fontsize=14)
-    plt.legend(fontsize=12)
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(path, dpi=300, bbox_inches="tight")
-    plt.close()
+    fig, ax = plt.subplots(figsize=(14, 4))
+    _style_ax(ax)
+    ax.plot(x[::step], (y_pred - y_true)[::step], color=_P["error"], linewidth=1.2, alpha=0.85)
+    ax.axhline(0, color=_P["zero"], linewidth=1.2, linestyle="--", alpha=0.7)
+    ax.fill_between(x[::step], (y_pred - y_true)[::step], 0,
+                    where=((y_pred - y_true)[::step] > 0), color=_P["fill_o"], alpha=0.12)
+    ax.fill_between(x[::step], (y_pred - y_true)[::step], 0,
+                    where=((y_pred - y_true)[::step] <= 0), color=_P["fill_u"], alpha=0.12)
+    ax.set_title(title, fontsize=15, fontweight="bold", pad=10)
+    ax.set_xlabel(xlabel, fontsize=12)
+    ax.set_ylabel("Error (Pred − True)", fontsize=12)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
 
 
 def save_metrics_bar_plot(metrics_dict, path):
     labels    = list(metrics_dict.keys())
-    mse_vals  = [m["MSE"]  for m in metrics_dict.values()]
     mae_vals  = [m["MAE"]  for m in metrics_dict.values()]
+    mse_vals  = [m["MSE"]  for m in metrics_dict.values()]
     rmse_vals = [m["RMSE"] for m in metrics_dict.values()]
     x, width = np.arange(len(labels)), 0.25
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.bar(x - width, mse_vals,  width, label="MSE",  color="skyblue")
-    ax.bar(x,         mae_vals,  width, label="MAE",  color="lightgreen")
-    ax.bar(x + width, rmse_vals, width, label="RMSE", color="salmon")
-    ax.set_xlabel("Dataset"); ax.set_ylabel("Error Metrics")
-    ax.set_title("Error Metrics Comparison Across Datasets", fontsize=16, fontweight="bold")
-    ax.set_xticks(x); ax.set_xticklabels(labels)
-    ax.legend(); ax.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(path, dpi=300, bbox_inches="tight")
-    plt.close()
+    fig, ax = plt.subplots(figsize=(9, 5))
+    _style_ax(ax)
+    ax.bar(x - width, mae_vals,  width, label="MAE",  color=_P["mae"],  zorder=3)
+    ax.bar(x,         mse_vals,  width, label="MSE",  color=_P["mse"],  zorder=3)
+    ax.bar(x + width, rmse_vals, width, label="RMSE", color=_P["rmse"], zorder=3)
+    ax.set_xlabel("Split", fontsize=12)
+    ax.set_ylabel("Error", fontsize=12)
+    ax.set_title("Metrics Comparison", fontsize=14, fontweight="bold", pad=10)
+    ax.set_xticks(x); ax.set_xticklabels(labels, fontsize=12)
+    ax.legend(fontsize=11, framealpha=0.9)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    png_path = os.path.splitext(path)[0] + ".png"
+    fig.savefig(png_path, format="png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return png_path
 
 
 def _ax_compare(ax, x, y_true, y_pred, title, downsample=15000):
     step = max(1, len(x) // downsample)
     xs, yt, yp = x[::step], y_true[::step], y_pred[::step]
-    ax.plot(xs, yt, label="True",      color="blue", linewidth=1.2)
-    ax.plot(xs, yp, label="Predicted", color="red",  linewidth=1.2, alpha=0.8)
-    ax.fill_between(xs, yt, yp, where=(yp >  yt), color="red",  alpha=0.08)
-    ax.fill_between(xs, yt, yp, where=(yp <= yt), color="blue", alpha=0.08)
-    ax.set_title(title, fontsize=12, fontweight="bold")
-    ax.set_ylabel("Value"); ax.legend(fontsize=9); ax.grid(True, alpha=0.3)
+    _style_ax(ax)
+    ax.plot(xs, yt, label="True",      color=_P["true"], linewidth=1.2)
+    ax.plot(xs, yp, label="Predicted", color=_P["pred"], linewidth=1.2, alpha=0.85)
+    ax.fill_between(xs, yt, yp, where=(yp >  yt), color=_P["pred"], alpha=0.12)
+    ax.fill_between(xs, yt, yp, where=(yp <= yt), color=_P["true"], alpha=0.12)
+    ax.set_title(title, fontsize=11, fontweight="bold")
+    ax.set_ylabel("Value", fontsize=10)
+    ax.legend(fontsize=9, framealpha=0.9)
 
 
 def _ax_error(ax, x, y_true, y_pred, title, downsample=15000):
     step = max(1, len(x) // downsample)
-    ax.plot(x[::step], (y_pred - y_true)[::step], color="purple", linewidth=1.2)
-    ax.axhline(0, color="black", linewidth=1, alpha=0.6)
-    ax.set_title(title, fontsize=12, fontweight="bold")
-    ax.set_ylabel("Error (Pred − True)"); ax.grid(True, alpha=0.3)
+    err = (y_pred - y_true)[::step]
+    _style_ax(ax)
+    ax.plot(x[::step], err, color=_P["error"], linewidth=1.1, alpha=0.85)
+    ax.axhline(0, color=_P["zero"], linewidth=1.1, linestyle="--", alpha=0.7)
+    ax.fill_between(x[::step], err, 0, where=(err >  0), color=_P["pred"], alpha=0.12)
+    ax.fill_between(x[::step], err, 0, where=(err <= 0), color=_P["true"], alpha=0.12)
+    ax.set_title(title, fontsize=11, fontweight="bold")
+    ax.set_ylabel("Error", fontsize=10)
 
 
 def _print_safe(text):
@@ -143,7 +183,7 @@ def print_metrics(title, metrics):
 # Mode 1: evaluate on fft_decomposition_cleaned (train / val / test splits)
 # ---------------------------------------------------------------------------
 
-def run_evaluate(base_dir=None, device=None, out_dir=None, model_path=None):
+def run_evaluate(base_dir=None, device=None, out_dir=None, model_path=None, swan_run=None):
     if base_dir is None:
         base_dir = os.path.dirname(os.path.abspath(__file__))
     if device is None:
@@ -241,24 +281,53 @@ def run_evaluate(base_dir=None, device=None, out_dir=None, model_path=None):
 
     step_all = max(1, len(all_true) // 15000)
     ax_all = axes["all"]
-    ax_all.plot(all_axis[::step_all], all_true[::step_all], label="True",      color="blue", linewidth=1.2)
-    ax_all.plot(all_axis[::step_all], all_pred[::step_all], label="Predicted", color="red",  linewidth=1.2, alpha=0.8)
-    ax_all.axvline(all_axis[train_end - 1], color="green",  linestyle="--", linewidth=1.5, label="Train/Val")
-    ax_all.axvline(all_axis[val_end   - 1], color="orange", linestyle="--", linewidth=1.5, label="Val/Test")
-    ax_all.set_title("All: True vs Predicted", fontsize=12, fontweight="bold")
-    ax_all.set_xlabel("Global Index"); ax_all.set_ylabel("Value")
-    ax_all.legend(fontsize=9, loc="upper right"); ax_all.grid(True, alpha=0.3)
+    _style_ax(ax_all)
+    ax_all.plot(all_axis[::step_all], all_true[::step_all], label="True",      color=_P["true"], linewidth=1.2)
+    ax_all.plot(all_axis[::step_all], all_pred[::step_all], label="Predicted", color=_P["pred"], linewidth=1.2, alpha=0.85)
+    ax_all.axvline(all_axis[train_end - 1], color=_P["split1"], linestyle="--", linewidth=1.5, label="Train/Val")
+    ax_all.axvline(all_axis[val_end   - 1], color=_P["split2"], linestyle="--", linewidth=1.5, label="Val/Test")
+    ax_all.set_title("Full Signal: True vs Predicted", fontsize=11, fontweight="bold")
+    ax_all.set_xlabel("Global Index", fontsize=10); ax_all.set_ylabel("Value", fontsize=10)
+    ax_all.legend(fontsize=9, loc="upper right", framealpha=0.9)
 
-    fig.suptitle(f"Evaluation Summary  |  MAE={test_metrics['MAE']:.4f}  RMSE={test_metrics['RMSE']:.4f}  R2={test_metrics['R2']:.4f}",
-                 fontsize=14, fontweight="bold", y=1.01)
+    fig.suptitle(
+        f"Evaluation Summary  ·  Test MAE={test_metrics['MAE']:.4f}  RMSE={test_metrics['RMSE']:.4f}  R²={test_metrics['R2']:.4f}",
+        fontsize=13, fontweight="bold", y=1.005, color="#222222",
+    )
+    fig.patch.set_facecolor("#FFFFFF")
     fig.tight_layout()
-    fig.savefig(os.path.join(out_dir, "evaluation_summary.svg"), dpi=150, bbox_inches="tight")
+    summary_svg = os.path.join(out_dir, "evaluation_summary.svg")
+    summary_png = os.path.join(out_dir, "evaluation_summary.png")
+    fig.savefig(summary_svg, dpi=150, bbox_inches="tight")
+    fig.savefig(summary_png, format="png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
-    save_metrics_bar_plot(
+    metrics_png = save_metrics_bar_plot(
         {"Train": train_metrics, "Val": val_metrics, "Test": test_metrics},
         os.path.join(out_dir, "metrics_comparison.svg"),
     )
+
+    if swan_run is not None:
+        try:
+            import swanlab
+            swanlab.log({
+                "eval/train_MAE":  train_metrics["MAE"],
+                "eval/train_MSE":  train_metrics["MSE"],
+                "eval/train_RMSE": train_metrics["RMSE"],
+                "eval/train_R2":   train_metrics["R2"],
+                "eval/val_MAE":    val_metrics["MAE"],
+                "eval/val_MSE":    val_metrics["MSE"],
+                "eval/val_RMSE":   val_metrics["RMSE"],
+                "eval/val_R2":     val_metrics["R2"],
+                "eval/test_MAE":   test_metrics["MAE"],
+                "eval/test_MSE":   test_metrics["MSE"],
+                "eval/test_RMSE":  test_metrics["RMSE"],
+                "eval/test_R2":    test_metrics["R2"],
+                "eval/summary":    swanlab.Image(summary_png, caption="Evaluation Summary"),
+                "eval/metrics_bar":swanlab.Image(metrics_png,  caption="Metrics Comparison"),
+            })
+        except Exception as e:
+            print(f"swanlab eval log failed: {e}")
 
     sio.savemat(os.path.join(out_dir, "model_outputs.mat"), {
         "train_true_norm":  y_train.reshape(-1, 1),

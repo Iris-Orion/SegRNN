@@ -9,7 +9,7 @@ import swanlab
 from datasets import CleanDataset, Matlab905Dataset, make_loaders
 from SegRNN import Model
 from Hyperparameter import (
-    Configs, H, L, batch_size, epochs, lr,
+    Configs, H, L, batch_size, epochs, lr, stride,
     use_early_stopping, early_stopping_patience, parse_args,
 )
 from evaluate import run_evaluate
@@ -69,21 +69,36 @@ if __name__ == "__main__":
     if args.swanlog:
         try:
             swan_run = swanlab.init(
-                project="SegRNN Training",
+                project="SegRNN-Training",
                 experiment_name=f"optloss_{current_date}",
                 mode=args.swanlab_mode,
                 config={
-                    "optimizer": configs.optimizer_name,
-                    "loss":      configs.loss_name,
-                    "lr":        effective_lr,
-                    "warmup":        args.warmup,
-                    "warmup_ratio":  args.warmup_ratio,
-                    "early_stopping":       use_early_stopping,
-                    "early_stopping_patience": early_stopping_patience,
-                    "grad_clip_norm": grad_clip_norm,
+                    # data
+                    "dataset":    args.dataset,
+                    "H":          H,
+                    "L":          L,
+                    "stride":     args.stride,
                     "batch_size": batch_size,
-                    "L": L, "H": H,
-                    "seg_len": configs.seg_len,
+                    # model
+                    "rnn_type":   configs.rnn_type,
+                    "dec_way":    configs.dec_way,
+                    "seg_len":    configs.seg_len,
+                    "num_layer":  configs.num_layer,
+                    "dropout":    configs.dropout,
+                    "enc_in":     configs.enc_in,
+                    "revin":      configs.revin,
+                    "channel_id": configs.channel_id,
+                    # training
+                    "epochs":     epochs,
+                    "optimizer":  configs.optimizer_name,
+                    "loss":       configs.loss_name,
+                    "lr":         effective_lr,
+                    "warmup":          args.warmup,
+                    "warmup_ratio":    args.warmup_ratio,
+                    "early_stopping":  use_early_stopping,
+                    "early_stopping_patience": early_stopping_patience,
+                    "grad_clip_norm":  grad_clip_norm,
+                    "seed":       configs.seed,
                 },
             )
             print(f"swanlab initialized (mode={args.swanlab_mode}).")
@@ -203,4 +218,4 @@ if __name__ == "__main__":
     print(f"Best metrics saved to {summary_path}")
 
     print("\n=== Running evaluation ===")
-    run_evaluate(base_dir=base_dir, device=device, out_dir=out_dir)
+    run_evaluate(base_dir=base_dir, device=device, out_dir=out_dir, swan_run=swan_run)
