@@ -1,15 +1,16 @@
 import time
 import datetime
 import os
+import warnings
 from contextlib import nullcontext
 from tqdm import tqdm
 import torch
 import matplotlib.pyplot as plt
 import swanlab 
 from datasets import CleanDataset, Matlab905Dataset, make_loaders
-from SegRNN import Model
+from modelzoo import build_model, get_configs
 from Hyperparameter import (
-    Configs, H, L, batch_size, epochs, lr, stride,
+    H, L, batch_size, epochs, lr, stride,
     use_early_stopping, early_stopping_patience, parse_args,
 )
 from evaluate import run_evaluate
@@ -23,10 +24,10 @@ if __name__ == "__main__":
     device = args.device
     H, L   = args.H, args.L   # may override Hyperparameter defaults
 
-    # Configs
-    configs = Configs()
-    configs.L              = H   # Configs.L = input history length
-    configs.H              = L   # Configs.H = forecast horizon
+    # Configs: model-specific defaults from modelzoo
+    configs = get_configs(args.model)
+    configs.L              = H   # lookback
+    configs.H              = L   # forecast
     configs.loss_name      = args.loss
     configs.optimizer_name = args.optimizer
     configs.seed           = args.seed
@@ -57,12 +58,14 @@ if __name__ == "__main__":
         dataset_cls  = Matlab905Dataset
         mat_file     = os.path.join(base_dir, "data", "matlab905(1).mat")
         dataset_name = "matlab905"
+        dataset_short = "matlab905"
     else:
         dataset_cls  = CleanDataset
         mat_file     = os.path.join(base_dir, "data", "fft_decomposition_cleaned.mat")
         dataset_name = "fft_decomposition_cleaned"
+        dataset_short = "clean"
 
-    out_dir = os.path.join(base_dir, "outputs", "SegRNN", dataset_name, current_date)
+    out_dir = os.path.join(base_dir, "outputs", args.model, dataset_name, current_date)
     os.makedirs(out_dir, exist_ok=True)
 
     swan_run = None
@@ -70,9 +73,10 @@ if __name__ == "__main__":
         try:
             swan_run = swanlab.init(
                 project="SegRNN-Training",
-                experiment_name=f"optloss_{current_date}",
+                experiment_name=f"{args.model}_{dataset_short}_{current_date}",
                 mode=args.swanlab_mode,
                 config={
+                    "model":      args.model,
                     # data
                     "dataset":    args.dataset,
                     "H":          H,
@@ -113,7 +117,7 @@ if __name__ == "__main__":
     )
 
     # Model
-    model = Model(configs).to(device)
+    model = build_model(args.model, configs).to(device)
 
     criterion = build_loss(configs)
     optimizer = build_optimizer(configs, model.parameters(), effective_lr)
@@ -129,6 +133,11 @@ if __name__ == "__main__":
     initial_memory = torch.cuda.memory_allocated(device) / (1024 ** 2)
 
     # Training loop
+    warnings.filterwarnings(
+        "ignore",
+        message=".*epoch parameter.*scheduler.step.*",
+        category=UserWarning,
+    )
     best_val_loss    = float("inf")
     best_train_loss  = float("inf")
     best_model_state = None
@@ -151,7 +160,11 @@ if __name__ == "__main__":
         current_lr = optimizer.param_groups[0]["lr"]
         if swan_run is not None:
             swanlab.log(
-                {"train_loss": float(train_loss), "val_loss": float(val_loss), "lr": float(current_lr)},
+                {
+                    "train_loss (normalized)": float(train_loss),
+                    "val_loss (normalized)":   float(val_loss),
+                    "lr": float(current_lr),
+                },
                 step=epoch + 1,
             )
 
@@ -170,7 +183,7 @@ if __name__ == "__main__":
         best_tag = " [best_val]" if is_best_val else ""
         epoch_bar.set_postfix(train=f"{train_loss:.6f}", val=f"{val_loss:.6f}", lr=f"{current_lr:.2e}")
         tqdm.write(
-            f"Epoch {epoch+1}/{epochs}  train={train_loss:.6f}  val={val_loss:.6f}"
+            f"Epoch {epoch+1}/{epochs}  train_loss={train_loss:.6f}  val_loss={val_loss:.6f}"
             f"  lr={current_lr:.8f}{best_tag}"
         )
 
@@ -179,12 +192,15 @@ if __name__ == "__main__":
             break
 
     # Save best model
+    best_model_path = os.path.join(out_dir, "best_model.pth")
     if best_val_loss < (best_metrics["val_loss"] if best_metrics else float("inf")):
         best_metrics    = {"H": H, "L": L, "batch_size": batch_size, "val_loss": best_val_loss}
-        best_model_path = os.path.join(out_dir, "best_model.pth")
         torch.save(best_model_state, best_model_path)
-        # keep a fixed-path copy for evaluate.py
-        torch.save(best_model_state, os.path.join(base_dir, "best_model.pth"))
+        # Save configs alongside checkpoint so evaluate can reconstruct the model
+        import json as _json
+        _config_path = os.path.join(out_dir, "model_config.json")
+        with open(_config_path, "w") as _f:
+            _json.dump({k: v for k, v in configs.__dict__.items() if not k.startswith("_")}, _f, indent=2)
         print(f"Saved best model to: {best_model_path}")
 
     # Loss curve
@@ -218,4 +234,6 @@ if __name__ == "__main__":
     print(f"Best metrics saved to {summary_path}")
 
     print("\n=== Running evaluation ===")
-    run_evaluate(base_dir=base_dir, device=device, out_dir=out_dir, swan_run=swan_run)
+    run_evaluate(base_dir=base_dir, device=device, out_dir=out_dir, swan_run=swan_run,
+                 dataset=args.dataset, model_name=args.model, configs=configs,
+                 stride=args.stride, model_path=best_model_path)

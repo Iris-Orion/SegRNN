@@ -10,12 +10,12 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from torch.utils.data import DataLoader, TensorDataset
 
-sns.set_theme(style="ticks", palette="muted", font_scale=1.05)
+sns.set_theme(style="ticks", palette="muted", font_scale=1.05)  # pyright: ignore[reportArgumentType]
 sns.despine()
 
 from split_data import split_data, create_sequences, calculate_metrics
-from SegRNN import Model
-from Hyperparameter import Configs, H, L, batch_size
+from modelzoo import build_model, get_configs
+from Hyperparameter import H, L, batch_size
 
 
 # ---------------------------------------------------------------------------
@@ -29,11 +29,21 @@ def _build_device():
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def _load_model(base_dir, device, model_path=None):
+def _load_model(base_dir, device, model_path=None, model_name="segrnn", configs=None):
+    import json as _json
     if model_path is None:
         model_path = os.path.join(base_dir, "best_model.pth")
-    configs = Configs()
-    model = Model(configs).to(device)
+    if configs is None:
+        # Try to load configs saved alongside the checkpoint
+        _config_path = os.path.join(os.path.dirname(model_path), "model_config.json")
+        if os.path.exists(_config_path):
+            with open(_config_path) as _f:
+                _saved = _json.load(_f)
+            configs = get_configs(model_name)
+            configs.__dict__.update(_saved)
+        else:
+            configs = get_configs(model_name)
+    model = build_model(model_name, configs).to(device)
     model.load_state_dict(
         torch.load(model_path, map_location=device),
         strict=False,
@@ -61,7 +71,9 @@ def _run_inference(model, loader, device):
 # ---------------------------------------------------------------------------
 # Color palette  (seaborn "muted" — low saturation, easy on the eyes)
 # ---------------------------------------------------------------------------
-_muted = sns.color_palette("muted")
+from typing import Any
+
+_muted: Any = sns.color_palette("muted")
 _P = {
     "true":   _muted[0],   # muted blue
     "pred":   _muted[1],   # muted orange
@@ -105,15 +117,18 @@ def save_error_plot(x, y_true, y_pred, title, path, xlabel="Index", downsample=1
     ax.plot(x[::step], (y_pred - y_true)[::step], color=_P["error"], linewidth=1.2, alpha=0.85)
     ax.axhline(0, color=_P["zero"], linewidth=1.2, linestyle="--", alpha=0.7)
     ax.fill_between(x[::step], (y_pred - y_true)[::step], 0,
-                    where=((y_pred - y_true)[::step] > 0), color=_P["fill_o"], alpha=0.12)
+                    where=((y_pred - y_true)[::step] > 0), color=_P["pred"], alpha=0.12)
     ax.fill_between(x[::step], (y_pred - y_true)[::step], 0,
-                    where=((y_pred - y_true)[::step] <= 0), color=_P["fill_u"], alpha=0.12)
+                    where=((y_pred - y_true)[::step] <= 0), color=_P["true"], alpha=0.12)
     ax.set_title(title, fontsize=15, fontweight="bold", pad=10)
     ax.set_xlabel(xlabel, fontsize=12)
     ax.set_ylabel("Error (Pred − True)", fontsize=12)
     fig.tight_layout()
     fig.savefig(path, dpi=150, bbox_inches="tight")
+    png_path = os.path.splitext(path)[0] + ".png"
+    fig.savefig(png_path, format="png", dpi=150, bbox_inches="tight")
     plt.close(fig)
+    return png_path
 
 
 def save_metrics_bar_plot(metrics_dict, path):
@@ -183,54 +198,43 @@ def print_metrics(title, metrics):
 # Mode 1: evaluate on fft_decomposition_cleaned (train / val / test splits)
 # ---------------------------------------------------------------------------
 
-def run_evaluate(base_dir=None, device=None, out_dir=None, model_path=None, swan_run=None):
+def run_evaluate(base_dir=None, device=None, out_dir=None, model_path=None, swan_run=None,
+                 dataset="clean", model_name="segrnn", configs=None, stride=20):
+    from datasets import CleanDataset, Matlab905Dataset, make_loaders as _make_loaders
+
     if base_dir is None:
         base_dir = os.path.dirname(os.path.abspath(__file__))
     if device is None:
         device = _build_device()
 
-    sequence_stride = int(os.getenv("SEQUENCE_STRIDE", "20"))
-    mat_file       = os.path.join(base_dir, "data", "fft_decomposition_cleaned.mat")
+    if dataset == "matlab905":
+        dataset_cls = Matlab905Dataset
+        mat_file    = os.path.join(base_dir, "data", "matlab905(1).mat")
+    else:
+        dataset_cls = CleanDataset
+        mat_file    = os.path.join(base_dir, "data", "fft_decomposition_cleaned.mat")
 
-    data = sio.loadmat(mat_file)
-    if "clean_data" not in data:
-        raise ValueError("clean_data not found in MAT file")
-    rawdata  = np.asarray(data["clean_data"]).reshape(-1).astype(np.float64)
-    data_min, data_max = rawdata.min(), rawdata.max()
-    data1    = (rawdata - data_min) / (data_max - data_min)
+    seq_H = configs.L if configs is not None else H  # lookback window
+    seq_L = configs.H if configs is not None else L  # forecast window
 
-    train_data, val_data, test_data = split_data(data1)
-    X_train, Y_train = create_sequences(train_data, H, L, stride=sequence_stride)
-    X_val,   Y_val   = create_sequences(val_data,   H, L, stride=sequence_stride)
-    X_test,  Y_test  = create_sequences(test_data,  H, L, stride=sequence_stride)
+    print(f"Evaluating  dataset={dataset_cls.__name__}  file={os.path.basename(mat_file)}"
+          f"  H={seq_H}  L={seq_L}  stride={stride}")
 
-    def trim(x, y):
-        n = (len(x) // batch_size) * batch_size
-        return x[:n], y[:n]
+    train_loader, val_loader, test_loader, (data_min, data_max) = _make_loaders(
+        dataset_cls, mat_file, seq_H, seq_L, batch_size, stride=stride
+    )
 
-    X_train, Y_train = trim(X_train, Y_train)
-    X_val,   Y_val   = trim(X_val,   Y_val)
-    X_test,  Y_test  = trim(X_test,  Y_test)
+    def collect_Y(loader):
+        return np.concatenate([y[..., 0].numpy() for _, y in loader], axis=0)
 
-    X_train = X_train.reshape(-1, H, 1);  Y_train = Y_train.reshape(-1, L, 1)
-    X_val   = X_val.reshape(-1, H, 1);    Y_val   = Y_val.reshape(-1, L, 1)
-    X_test  = X_test.reshape(-1, H, 1);   Y_test  = Y_test.reshape(-1, L, 1)
-
-    def make_loader(X, Y):
-        return DataLoader(
-            TensorDataset(torch.tensor(X, dtype=torch.float32).to(device),
-                          torch.tensor(Y, dtype=torch.float32).to(device)),
-            batch_size=batch_size, shuffle=False,
-        )
-
-    train_loader = make_loader(X_train, Y_train)
-    val_loader   = make_loader(X_val,   Y_val)
-    test_loader  = make_loader(X_test,  Y_test)
+    Y_train = collect_Y(train_loader)
+    Y_val   = collect_Y(val_loader)
+    Y_test  = collect_Y(test_loader)
 
     ts         = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    model      = _load_model(base_dir, device, model_path)
+    model      = _load_model(base_dir, device, model_path, model_name=model_name, configs=configs)
     if out_dir is None:
-        out_dir = _make_out_dir(base_dir, "SegRNN",
+        out_dir = _make_out_dir(base_dir, model_name,
                                 os.path.splitext(os.path.basename(mat_file))[0], ts)
     else:
         os.makedirs(out_dir, exist_ok=True)
@@ -244,7 +248,7 @@ def run_evaluate(base_dir=None, device=None, out_dir=None, model_path=None, swan
     test_preds  = _run_inference(model, test_loader,  device)[:, 0]
     testing_time = time.time() - t0
 
-    y_train, y_val, y_test = Y_train[:, 0, 0], Y_val[:, 0, 0], Y_test[:, 0, 0]
+    y_train, y_val, y_test = Y_train[:, 0], Y_val[:, 0], Y_test[:, 0]
     train_metrics = calculate_metrics(y_train, train_preds)
     val_metrics   = calculate_metrics(y_val,   val_preds)
     test_metrics  = calculate_metrics(y_test,  test_preds)
@@ -262,25 +266,50 @@ def run_evaluate(base_dir=None, device=None, out_dir=None, model_path=None, swan
                 f.write(f"  {k}: {v}\n")
             f.write("\n")
 
+    # Raw signal overview plot
+    if dataset == "matlab905":
+        with h5py.File(mat_file, "r") as _f:
+            _raw = np.asarray(_f["data"][...]).reshape(-1).astype(np.float64)
+    else:
+        _raw = np.asarray(sio.loadmat(mat_file)["clean_data"]).reshape(-1).astype(np.float64)  # pyright: ignore[reportIndexIssue]
+    _raw = np.where(np.isnan(_raw), np.nanmean(_raw), _raw)
+    n_raw = len(_raw)
+    t_raw_end = int(0.6 * n_raw)
+    v_raw_end = t_raw_end + int(0.2 * n_raw)
+
+    fig_raw, ax_raw = plt.subplots(figsize=(18, 4))
+    _style_ax(ax_raw)
+    ax_raw.plot(_raw, color=_P["true"], linewidth=0.5)
+    ax_raw.axvline(t_raw_end, color=_P["split1"], linestyle="--", linewidth=1.5, label="Train/Val")
+    ax_raw.axvline(v_raw_end, color=_P["split2"], linestyle="--", linewidth=1.5, label="Val/Test")
+    ax_raw.set_title(f"Raw Signal — {os.path.basename(mat_file)}", fontsize=13, fontweight="bold")
+    ax_raw.set_xlabel("Index"); ax_raw.set_ylabel("Value")
+    ax_raw.legend(fontsize=9, framealpha=0.9)
+    fig_raw.tight_layout()
+    raw_svg = os.path.join(out_dir, "raw_signal.svg")
+    raw_png = os.path.join(out_dir, "raw_signal.png")
+    fig_raw.savefig(raw_svg, dpi=150, bbox_inches="tight")
+    fig_raw.savefig(raw_png, format="png", dpi=150, bbox_inches="tight")
+    plt.close(fig_raw)
+
     all_true  = np.concatenate([train_true, val_true, test_true])
     all_pred  = np.concatenate([train_pred, val_pred, test_pred])
     all_axis  = np.arange(len(all_true))
     train_end = len(train_true);  val_end = train_end + len(val_true)
 
     fig, axes = plt.subplot_mosaic(
-        [["train", "val"],
-         ["test",  "error"],
-         ["all",   "all"]],
-        figsize=(20, 18),
+        [["train", "val", "test"],
+         ["all",   "all", "all"]],
+        figsize=(26, 12),
+        height_ratios=[1, 1.3],
     )
 
-    _ax_compare(axes["train"], np.arange(len(train_true)), train_true, train_pred, "Train: True vs Pred")
-    _ax_compare(axes["val"],   np.arange(len(val_true)),   val_true,   val_pred,   "Validation: True vs Pred")
-    _ax_compare(axes["test"],  np.arange(len(test_true)),  test_true,  test_pred,  "Test: True vs Pred")
-    _ax_error(  axes["error"], np.arange(len(test_true)),  test_true,  test_pred,  "Test: Prediction Error")
+    _ax_compare(axes["train"], np.arange(len(train_true)), train_true, train_pred, "Train: True vs Pred")  # pyright: ignore[reportArgumentType, reportIndexIssue]
+    _ax_compare(axes["val"],   np.arange(len(val_true)),   val_true,   val_pred,   "Val: True vs Pred")  # pyright: ignore[reportArgumentType, reportIndexIssue]
+    _ax_compare(axes["test"],  np.arange(len(test_true)),  test_true,  test_pred,  "Test: True vs Pred")  # pyright: ignore[reportArgumentType, reportIndexIssue]
 
     step_all = max(1, len(all_true) // 15000)
-    ax_all = axes["all"]
+    ax_all = axes["all"]  # pyright: ignore[reportArgumentType, reportIndexIssue]
     _style_ax(ax_all)
     ax_all.plot(all_axis[::step_all], all_true[::step_all], label="True",      color=_P["true"], linewidth=1.2)
     ax_all.plot(all_axis[::step_all], all_pred[::step_all], label="Predicted", color=_P["pred"], linewidth=1.2, alpha=0.85)
@@ -294,7 +323,7 @@ def run_evaluate(base_dir=None, device=None, out_dir=None, model_path=None, swan
         f"Evaluation Summary  ·  Test MAE={test_metrics['MAE']:.4f}  RMSE={test_metrics['RMSE']:.4f}  R²={test_metrics['R2']:.4f}",
         fontsize=13, fontweight="bold", y=1.005, color="#222222",
     )
-    fig.patch.set_facecolor("#FFFFFF")
+    fig.patch.set_facecolor("#FFFFFF")  # pyright: ignore[reportAttributeAccessIssue]
     fig.tight_layout()
     summary_svg = os.path.join(out_dir, "evaluation_summary.svg")
     summary_png = os.path.join(out_dir, "evaluation_summary.png")
@@ -302,15 +331,43 @@ def run_evaluate(base_dir=None, device=None, out_dir=None, model_path=None, swan
     fig.savefig(summary_png, format="png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
+    # Standalone test error plot
+    error_png = save_error_plot(np.arange(len(test_true)), test_true, test_pred,
+                                "Test: Prediction Error",
+                                os.path.join(out_dir, "test_error.svg"))
+
+    # Standalone train detail figure (raw signal, predictions, overlay)
+    fig_train, axs_train = plt.subplots(3, 1, figsize=(18, 12))
+    _style_ax(axs_train[0])
+    axs_train[0].plot(_raw[:t_raw_end], color=_P["true"], linewidth=0.5)
+    axs_train[0].set_title("Train: Raw Signal", fontsize=13, fontweight="bold")
+    axs_train[0].set_ylabel("Value")
+    _style_ax(axs_train[1])
+    axs_train[1].plot(train_pred, color=_P["pred"], linewidth=0.5)
+    axs_train[1].set_title("Train: Predictions", fontsize=13, fontweight="bold")
+    axs_train[1].set_ylabel("Value")
+    _style_ax(axs_train[2])
+    axs_train[2].plot(train_true, label="True", color=_P["true"], linewidth=0.5)
+    axs_train[2].plot(train_pred, label="Predicted", color=_P["pred"], linewidth=0.5, alpha=0.85)
+    axs_train[2].set_title("Train: True vs Predicted", fontsize=13, fontweight="bold")
+    axs_train[2].set_ylabel("Value"); axs_train[2].legend(fontsize=9, framealpha=0.9)
+    fig_train.suptitle("Training Set Detail", fontsize=14, fontweight="bold", y=1.005)
+    fig_train.tight_layout()
+    train_detail_svg = os.path.join(out_dir, "train_detail.svg")
+    train_detail_png = os.path.join(out_dir, "train_detail.png")
+    fig_train.savefig(train_detail_svg, dpi=150, bbox_inches="tight")
+    fig_train.savefig(train_detail_png, format="png", dpi=150, bbox_inches="tight")
+    plt.close(fig_train)
+
     metrics_png = save_metrics_bar_plot(
         {"Train": train_metrics, "Val": val_metrics, "Test": test_metrics},
         os.path.join(out_dir, "metrics_comparison.svg"),
     )
 
     if swan_run is not None:
+        import swanlab as _swanlab
         try:
-            import swanlab
-            swanlab.log({
+            _swanlab.log({
                 "eval/train_MAE":  train_metrics["MAE"],
                 "eval/train_MSE":  train_metrics["MSE"],
                 "eval/train_RMSE": train_metrics["RMSE"],
@@ -323,11 +380,21 @@ def run_evaluate(base_dir=None, device=None, out_dir=None, model_path=None, swan
                 "eval/test_MSE":   test_metrics["MSE"],
                 "eval/test_RMSE":  test_metrics["RMSE"],
                 "eval/test_R2":    test_metrics["R2"],
-                "eval/summary":    swanlab.Image(summary_png, caption="Evaluation Summary"),
-                "eval/metrics_bar":swanlab.Image(metrics_png,  caption="Metrics Comparison"),
             })
+            print("swanlab: eval metrics logged.")
         except Exception as e:
-            print(f"swanlab eval log failed: {e}")
+            print(f"swanlab eval metrics log failed: {e}")
+        try:
+            _swanlab.log({
+                "vis/raw_signal":   _swanlab.Image(raw_png,   caption="Raw Signal"),
+                "vis/train_detail": _swanlab.Image(train_detail_png, caption="Training Set Detail"),
+                "vis/summary":     _swanlab.Image(summary_png, caption="Evaluation Summary"),
+                "vis/metrics_bar": _swanlab.Image(metrics_png,  caption="Metrics Comparison"),
+                "vis/test_error":  _swanlab.Image(error_png,   caption="Test Error"),
+            })
+            print("swanlab: eval images logged.")
+        except Exception as e:
+            print(f"swanlab eval images log failed: {e}")
 
     sio.savemat(os.path.join(out_dir, "model_outputs.mat"), {
         "train_true_norm":  y_train.reshape(-1, 1),
@@ -382,7 +449,7 @@ def _build_windows(signal, H_len, L_len, stride):
     return X, Y, np.array(starts, dtype=np.int64)
 
 
-def run_predict_matlab905(base_dir=None, device=None):
+def run_predict_matlab905(base_dir=None, device=None, model_name="segrnn", configs=None):
     if base_dir is None:
         base_dir = os.path.dirname(os.path.abspath(__file__))
     if device is None:
@@ -424,8 +491,8 @@ def run_predict_matlab905(base_dir=None, device=None):
         batch_size=batch_size, shuffle=False,
     )
 
-    model   = _load_model(base_dir, device)
-    out_dir = _make_out_dir(base_dir, "SegRNN",
+    model   = _load_model(base_dir, device, model_name=model_name, configs=configs)
+    out_dir = _make_out_dir(base_dir, model_name,
                             os.path.splitext(os.path.basename(input_mat))[0], ts)
     print(f"Loaded model  params={sum(p.numel() for p in model.parameters()):,}")
 
@@ -494,13 +561,19 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["evaluate", "predict"], default="evaluate",
                         help="evaluate: train/val/test on clean data; predict: full inference on matlab905")
+    parser.add_argument("--model", default="segrnn", choices=["segrnn", "segmamba"],
+                        help="Model architecture matching the checkpoint")
     parser.add_argument("--model-path", default=os.path.join(_base, "best_model.pth"),
                         help="Path to .pth checkpoint")
+    parser.add_argument("--dataset", default="clean", choices=["clean", "matlab905"],
+                        help="Dataset to evaluate on")
+    parser.add_argument("--stride", type=int, default=20)
     args = parser.parse_args()
 
     if args.mode == "predict":
-        run_predict_matlab905()
+        run_predict_matlab905(model_name=args.model)
     else:
-        _pth_dir  = os.path.dirname(os.path.abspath(args.model_path))
-        _out_dir  = os.path.join(_pth_dir, "standalone_eval")
-        run_evaluate(out_dir=_out_dir, model_path=args.model_path)
+        _pth_dir = os.path.dirname(os.path.abspath(args.model_path))
+        _out_dir = os.path.join(_pth_dir, "standalone_eval")
+        run_evaluate(out_dir=_out_dir, model_path=args.model_path,
+                     dataset=args.dataset, model_name=args.model, stride=args.stride)
