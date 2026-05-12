@@ -194,3 +194,17 @@ class Model(nn.Module):
             y = y.permute(0, 2, 1) + seq_last
 
         return y
+
+
+import sys, os as _os
+sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+from Hyperparameter import BaseConfigs
+
+
+class SegRNNConfigs(BaseConfigs):
+    """Default hyperparameters for SegRNN."""
+    def __init__(self):
+        super().__init__()
+        self.rnn_type = 'rnn'
+        self.dec_way  = 'rmf'
+        self.seg_len  = 20

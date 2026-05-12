@@ -8,7 +8,7 @@ H = 400   # history / input window
 L = 200   # forecast / prediction window
 
 batch_size = 128
-epochs     = 100
+epochs     = 50
 lr         = 0.0005
 stride     = 20
 
@@ -16,22 +16,27 @@ use_early_stopping      = False
 early_stopping_patience = 5
 
 
-class Configs:
+class BaseConfigs:
+    """Shared hyperparameters for all models. Subclassed by model-specific configs in modelzoo/."""
     def __init__(self):
-        self.L          = H        # model input/history length
-        self.H          = L        # model forecast/prediction length
-        self.enc_in     = 1        # 输入维度
+        self.L          = H        # lookback window length
+        self.H          = L        # forecast horizon
+        self.enc_in     = 1
         self.num_layer  = 512
-        self.dropout    = 0.1      # dropout 概率
-        self.rnn_type   = 'rnn'    # RNN 类型
-        self.dec_way    = 'rmf'    # 解码方式
-        self.seg_len    = 10       # 片段长度
-        self.channel_id = False    # 是否启用 channel id
-        self.revin      = True     # 是否使用 RevIN
-        # 训练行为（可被 train.py 的 args 覆盖）
+        self.dropout    = 0.1
+        self.channel_id = False
+        self.revin      = True
+        # RNN-specific (None for non-RNN models)
+        self.rnn_type: str | None = None
+        self.dec_way:  str | None = None
+        # training (overridden by args)
         self.seed           = 2048
         self.loss_name      = "l1"
         self.optimizer_name = "adamw"
+
+
+# backward-compat alias used by evaluate.py
+Configs = BaseConfigs
 
 
 def parse_args():
@@ -39,6 +44,7 @@ def parse_args():
     import torch
 
     parser = argparse.ArgumentParser(description="Train SegRNN")
+    parser.add_argument("--model",         default="segrnn",  choices=["segrnn", "segmamba"], help="Model architecture")
     parser.add_argument("--dataset",       default="clean",   choices=["clean", "matlab905"], help="Training dataset")
     parser.add_argument("--H",             type=int,          default=H,        help="Lookback window length")
     parser.add_argument("--L",             type=int,          default=L,        help="Forecast horizon")
