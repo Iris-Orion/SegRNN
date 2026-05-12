@@ -165,7 +165,6 @@ if __name__ == "__main__":
                     "val_loss (normalized)":   float(val_loss),
                     "lr": float(current_lr),
                 },
-                step=epoch + 1,
             )
 
         if train_loss < best_train_loss:
@@ -212,7 +211,7 @@ if __name__ == "__main__":
     plt.ylabel("Loss")
     plt.legend()
     plt.grid(True)
-    plt.savefig(os.path.join(out_dir, "loss_curve.svg"), format="svg", dpi=300)
+    plt.savefig(os.path.join(out_dir, "loss_curve.png"), format="png", dpi=300)
 
     end_time         = time.time()
     training_duration = end_time - start_time

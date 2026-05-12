@@ -106,8 +106,10 @@ def save_compare_plot(x, y_true, y_pred, title, path, xlabel="Index", downsample
     ax.set_ylabel("Value", fontsize=12)
     ax.legend(fontsize=11, framealpha=0.9)
     fig.tight_layout()
-    fig.savefig(path, dpi=150, bbox_inches="tight")
+    png_path = os.path.splitext(path)[0] + ".png"
+    fig.savefig(png_path, format="png", dpi=150, bbox_inches="tight")
     plt.close(fig)
+    return png_path
 
 
 def save_error_plot(x, y_true, y_pred, title, path, xlabel="Index", downsample=15000):
@@ -124,7 +126,6 @@ def save_error_plot(x, y_true, y_pred, title, path, xlabel="Index", downsample=1
     ax.set_xlabel(xlabel, fontsize=12)
     ax.set_ylabel("Error (Pred − True)", fontsize=12)
     fig.tight_layout()
-    fig.savefig(path, dpi=150, bbox_inches="tight")
     png_path = os.path.splitext(path)[0] + ".png"
     fig.savefig(png_path, format="png", dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -148,7 +149,6 @@ def save_metrics_bar_plot(metrics_dict, path):
     ax.set_xticks(x); ax.set_xticklabels(labels, fontsize=12)
     ax.legend(fontsize=11, framealpha=0.9)
     fig.tight_layout()
-    fig.savefig(path, dpi=150, bbox_inches="tight")
     png_path = os.path.splitext(path)[0] + ".png"
     fig.savefig(png_path, format="png", dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -224,6 +224,16 @@ def run_evaluate(base_dir=None, device=None, out_dir=None, model_path=None, swan
         dataset_cls, mat_file, seq_H, seq_L, batch_size, stride=stride
     )
 
+    # Force non-shuffled train loader for evaluation to prevent misalignment
+    train_loader = DataLoader(
+        train_loader.dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=getattr(train_loader, "num_workers", 0),
+        pin_memory=getattr(train_loader, "pin_memory", False),
+        persistent_workers=getattr(train_loader, "persistent_workers", False)
+    )
+
     def collect_Y(loader):
         return np.concatenate([y[..., 0].numpy() for _, y in loader], axis=0)
 
@@ -286,9 +296,7 @@ def run_evaluate(base_dir=None, device=None, out_dir=None, model_path=None, swan
     ax_raw.set_xlabel("Index"); ax_raw.set_ylabel("Value")
     ax_raw.legend(fontsize=9, framealpha=0.9)
     fig_raw.tight_layout()
-    raw_svg = os.path.join(out_dir, "raw_signal.svg")
     raw_png = os.path.join(out_dir, "raw_signal.png")
-    fig_raw.savefig(raw_svg, dpi=150, bbox_inches="tight")
     fig_raw.savefig(raw_png, format="png", dpi=150, bbox_inches="tight")
     plt.close(fig_raw)
 
@@ -325,16 +333,14 @@ def run_evaluate(base_dir=None, device=None, out_dir=None, model_path=None, swan
     )
     fig.patch.set_facecolor("#FFFFFF")  # pyright: ignore[reportAttributeAccessIssue]
     fig.tight_layout()
-    summary_svg = os.path.join(out_dir, "evaluation_summary.svg")
     summary_png = os.path.join(out_dir, "evaluation_summary.png")
-    fig.savefig(summary_svg, dpi=150, bbox_inches="tight")
     fig.savefig(summary_png, format="png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
     # Standalone test error plot
     error_png = save_error_plot(np.arange(len(test_true)), test_true, test_pred,
                                 "Test: Prediction Error",
-                                os.path.join(out_dir, "test_error.svg"))
+                                os.path.join(out_dir, "test_error.png"))
 
     # Standalone train detail figure (raw signal, predictions, overlay)
     fig_train, axs_train = plt.subplots(3, 1, figsize=(18, 12))
@@ -353,15 +359,13 @@ def run_evaluate(base_dir=None, device=None, out_dir=None, model_path=None, swan
     axs_train[2].set_ylabel("Value"); axs_train[2].legend(fontsize=9, framealpha=0.9)
     fig_train.suptitle("Training Set Detail", fontsize=14, fontweight="bold", y=1.005)
     fig_train.tight_layout()
-    train_detail_svg = os.path.join(out_dir, "train_detail.svg")
     train_detail_png = os.path.join(out_dir, "train_detail.png")
-    fig_train.savefig(train_detail_svg, dpi=150, bbox_inches="tight")
     fig_train.savefig(train_detail_png, format="png", dpi=150, bbox_inches="tight")
     plt.close(fig_train)
 
     metrics_png = save_metrics_bar_plot(
         {"Train": train_metrics, "Val": val_metrics, "Test": test_metrics},
-        os.path.join(out_dir, "metrics_comparison.svg"),
+        os.path.join(out_dir, "metrics_comparison.png"),
     )
 
     if swan_run is not None:
@@ -524,9 +528,9 @@ def run_predict_matlab905(base_dir=None, device=None, model_name="segrnn", confi
 
     idx = np.where(valid)[0]
     save_compare_plot(idx, yt, yp, "matlab905: True vs Predicted",
-                      os.path.join(out_dir, "compare.svg"))
+                      os.path.join(out_dir, "compare.png"))
     save_error_plot(  idx, yt, yp, "matlab905: Prediction Error",
-                      os.path.join(out_dir, "error.svg"))
+                      os.path.join(out_dir, "error.png"))
 
     sio.savemat(os.path.join(out_dir, "predictions.mat"), {
         "signal":            signal.reshape(-1, 1),

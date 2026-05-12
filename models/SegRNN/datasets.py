@@ -61,7 +61,10 @@ def _fill_nan(sig):
 
 class _BaseTimeSeriesDataset(Dataset):
     """
-    Base: load signal -> fill NaN -> normalize -> split -> sliding windows.
+    Base: load signal -> fill NaN -> split -> normalize (per-split, using train stats).
+
+    Normalization uses train-set min/max for all splits — prevents leakage and
+    keeps the model's input space consistent across train/val/test.
 
     Args:
         split       : 'train' | 'val' | 'test' | 'all'
@@ -70,8 +73,6 @@ class _BaseTimeSeriesDataset(Dataset):
         stride      : sliding-window step
         train_ratio : fraction used for train
         val_ratio   : fraction used for val
-        norm_stats  : (data_min, data_max) from the train split;
-                      pass to val/test to prevent leakage
     """
 
     def _load_raw_signal(self) -> np.ndarray:
@@ -83,32 +84,34 @@ class _BaseTimeSeriesDataset(Dataset):
         self.split = split
         self.H, self.L = H, L
 
-        # Normalize full signal first, then split (global min/max)
-        self.data_min = float(raw.min())
-        self.data_max = float(raw.max())
-        scale = self.data_max - self.data_min
-        if scale == 0:
-            raise ValueError("Constant signal; cannot normalize.")
-        normalized = (raw - self.data_min) / scale
-
-        n = len(normalized)
+        # Split raw signal first, then normalize using train stats
+        n = len(raw)
         train_end = int(train_ratio * n)
         val_end = train_end + int(val_ratio * n)
 
-        seg = {"train": normalized[:train_end],
-               "val":   normalized[train_end:val_end],
-               "test":  normalized[val_end:],
-               "all":   normalized}.get(split)
+        seg = {"train": raw[:train_end],
+               "val":   raw[train_end:val_end],
+               "test":  raw[val_end:],
+               "all":   raw}.get(split)
         if seg is None:
             raise ValueError(f"split must be 'train'/'val'/'test'/'all', got {split!r}")
 
-        starts = list(range(0, len(seg) - H - L + 1, stride))
+        # Use train portion stats for all splits (no leakage)
+        train_seg = raw[:train_end]
+        self.data_min = float(train_seg.min())
+        self.data_max = float(train_seg.max())
+        scale = self.data_max - self.data_min
+        if scale == 0:
+            raise ValueError("Constant signal; cannot normalize.")
+        normalized = (seg - self.data_min) / scale
+
+        starts = list(range(0, len(normalized) - H - L + 1, stride))
         if not starts:
             raise ValueError(
-                f"Segment too short ({len(seg)}) for H={H}+L={L}, stride={stride}."
+                f"Segment too short ({len(normalized)}) for H={H}+L={L}, stride={stride}."
             )
-        self.X = np.array([seg[s: s + H] for s in starts], dtype=np.float32)
-        self.Y = np.array([seg[s + H: s + H + L] for s in starts], dtype=np.float32)
+        self.X = np.array([normalized[s: s + H] for s in starts], dtype=np.float32)
+        self.Y = np.array([normalized[s + H: s + H + L] for s in starts], dtype=np.float32)
         self.n_samples = len(self.X)
 
     def __len__(self):
